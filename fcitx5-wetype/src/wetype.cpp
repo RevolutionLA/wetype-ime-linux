@@ -45,10 +45,7 @@
 
 namespace fcitx {
 
-static constexpr int GRID_ROWS = 4;
-static constexpr int GRID_COLUMNS = 5;
-static constexpr int COMPACT_PAGE_SIZE = GRID_COLUMNS;
-static constexpr int PAGE_SIZE = GRID_ROWS * GRID_COLUMNS;
+static constexpr int COMPACT_PAGE_SIZE = 5;   // 每页候选数: 翻页步进与数字选词范围
 static constexpr uint64_t ENGINE_RESTART_DELAY_USEC = 200000;
 
 // Display-only segmentation. The original unsegmented buffer is still sent to
@@ -472,7 +469,6 @@ public:
         candidatesCurrent_ = false;
         windowStart_ = 0;
         selected_ = 0;
-        expandedGrid_ = false;
         recoveryTried_ = false;
         eng_.send("SAVE", nullptr);
         eng_.send("C", nullptr);
@@ -498,7 +494,6 @@ public:
         candidatesCurrent_ = false;
         windowStart_ = 0;
         selected_ = 0;
-        expandedGrid_ = false;
         recoveryTried_ = false;
         eng_.send("C", nullptr);
         if (had) updateUI(*ic);
@@ -517,57 +512,28 @@ private:
         }
         if (!cands_.empty()) {
             const int start = windowStart_;
-            const int visiblePageSize = expandedGrid_ ? PAGE_SIZE : COMPACT_PAGE_SIZE;
-            const int end = std::min<int>(start + visiblePageSize, cands_.size());
+            const int end = std::min<int>(start + COMPACT_PAGE_SIZE, cands_.size());
             const int pageCount = end - start;
             if (selected_ < start || selected_ >= end) selected_ = start;
             auto cl = std::make_unique<CommonCandidateList>();
             cl->setLayoutHint(CandidateLayoutHint::Horizontal);
-            if (!expandedGrid_) {
-                cl->setPageSize(pageCount);
-                for (int index = start; index < end; ++index) {
-                    Text candidate;
-                    candidate.append(std::to_string(index - start + 1) + " ");
-                    candidate.append(cands_[index]);
-                    // 青简式英文注释：候选词后附浅色小字译文
-                    if (const char *g = glossary_.lookup(cands_[index])) {
-                        candidate.append("  " + std::string(g), TextFormatFlag::Italic);
-                    }
-                    cl->append<GridColumnCandidate>(std::move(candidate),
-                        [this, index](InputContext *context) {
-                            commitCandidate(context, index);
-                        });
+            cl->setPageSize(pageCount);
+            for (int index = start; index < end; ++index) {
+                Text candidate;
+                candidate.append(std::to_string(index - start + 1) + " ");
+                candidate.append(cands_[index]);
+                // 青简式英文注释：候选词后附浅色小字译文
+                if (const char *g = glossary_.lookup(cands_[index])) {
+                    candidate.append("  " + std::string(g), TextFormatFlag::Italic);
                 }
-                // The API validates this index immediately against the list
-                // size, so set it only after all compact candidates exist.
-                cl->setGlobalCursorIndex(selected_ - start);
-            } else {
-                cl->setPageSize(GRID_COLUMNS);
-                cl->setLabels(std::vector<std::string>(GRID_COLUMNS, ""));
-                cl->setGlobalCursorIndex(-1);
-                for (int col = 0; col < GRID_COLUMNS; ++col) {
-                    Text column;
-                    for (int row = 0; row < GRID_ROWS; ++row) {
-                        const int index = start + row * GRID_COLUMNS + col;
-                        if (index < end) {
-                            const bool selected = index == selected_;
-                            const auto label = std::to_string(index - start + 1) + " ";
-                            const auto flag = selected ? TextFormatFlag::HighLight
-                                                       : TextFormatFlag::NoFlag;
-                            column.append(label, flag);
-                            column.append(cands_[index], flag);
-                        } else {
-                            column.append(" ");
-                        }
-                        if (row + 1 < GRID_ROWS) column.append("\n");
-                    }
-                    const int selectedIndex = selected_;
-                    cl->append<GridColumnCandidate>(std::move(column),
-                        [this, selectedIndex](InputContext *context) {
-                            commitCandidate(context, selectedIndex);
-                        });
-                }
+                cl->append<GridColumnCandidate>(std::move(candidate),
+                    [this, index](InputContext *context) {
+                        commitCandidate(context, index);
+                    });
             }
+            // The API validates this index immediately against the list
+            // size, so set it only after all candidates exist.
+            cl->setGlobalCursorIndex(selected_ - start);
             panel.setCandidateList(std::move(cl));
         }
         ic.updateUserInterface(UserInterfaceComponent::InputPanel);
@@ -585,7 +551,6 @@ private:
         candidatesCurrent_ = false;
         windowStart_ = 0;
         selected_ = 0;
-        expandedGrid_ = false;
         recoveryTried_ = false;
         eng_.send("C", nullptr);          // 重建会话
         updateUI(*ic);
@@ -613,7 +578,6 @@ private:
         candidatesCurrent_ = false;
         windowStart_ = 0;
         selected_ = 0;
-        expandedGrid_ = false;
         eng_.send("S " + std::to_string(index), candidateHandler());
         updateUI(*ic);
     }
@@ -743,7 +707,6 @@ private:
     bool candidatesCurrent_ = false;
     int windowStart_ = 0;
     int selected_ = 0;
-    bool expandedGrid_ = false;
     bool recoveryTried_ = false;
     std::atomic<bool> pendingSpaceCommit_{false};   // 空格先于候选到达: 候选回来自动上屏首选
     bool lastCommitCJK_ = true;   // 上次上屏是否以中文结尾: 决定标点全/半角
@@ -758,7 +721,6 @@ private:
         candidatesCurrent_ = false;
         windowStart_ = 0;
         selected_ = 0;
-        expandedGrid_ = false;
         recoveryTried_ = false;
         eng_.send("C", nullptr);
         if (ic) updateUI(*ic);
@@ -802,54 +764,33 @@ void WeTypeEngine::keyEvent(const InputMethodEntry &, KeyEvent &event) {
             updateUI(*ic);
             requestCandidates(replayBuffer ? buf_ : std::string(1, c));
         }
-        // The compact single row expands to the four-row grid on Down.
+        // 方向键: 左右在当前 5 个候选内移动, 上/下 = 上一页/下一页(每页 5 个)
         else if (!buf_.empty() && candidatesCurrent_ && !cands_.empty() &&
                  (sym == FcitxKey_Left || sym == FcitxKey_Right ||
                   sym == FcitxKey_Up || sym == FcitxKey_Down)) {
-            if (!expandedGrid_) {
-                if (sym == FcitxKey_Down) {
-                    expandedGrid_ = true;
-                } else if (sym == FcitxKey_Left && selected_ > windowStart_) {
-                    --selected_;
-                } else if (sym == FcitxKey_Right &&
-                           selected_ + 1 < std::min<int>(windowStart_ + COMPACT_PAGE_SIZE,
-                                                       cands_.size())) {
-                    ++selected_;
-                }
-                updateUI(*ic);
-                handled = true;
+            if (sym == FcitxKey_Left && selected_ > windowStart_) {
+                --selected_;
+            } else if (sym == FcitxKey_Right &&
+                       selected_ + 1 < std::min<int>(windowStart_ + COMPACT_PAGE_SIZE,
+                                                   cands_.size())) {
+                ++selected_;
+            } else if (sym == FcitxKey_Up && windowStart_ > 0) {
+                windowStart_ -= COMPACT_PAGE_SIZE;
+                selected_ = windowStart_;
+            } else if (sym == FcitxKey_Down &&
+                       windowStart_ + COMPACT_PAGE_SIZE < (int)cands_.size()) {
+                windowStart_ += COMPACT_PAGE_SIZE;
+                selected_ = windowStart_;
             } else {
-            const int start = windowStart_;
-            const int count = std::min<int>(PAGE_SIZE,
-                static_cast<int>(cands_.size()) - start);
-            const int row = (selected_ - start) / GRID_COLUMNS;
-            const int col = (selected_ - start) % GRID_COLUMNS;
-            int next = selected_;
-            if (sym == FcitxKey_Left && col > 0) next--;
-            if (sym == FcitxKey_Right && col + 1 < GRID_COLUMNS && next + 1 < start + count) next++;
-            if (sym == FcitxKey_Up) {
-                if (row > 0) next -= GRID_COLUMNS;
-                else if (start >= GRID_COLUMNS) {
-                    windowStart_ -= GRID_COLUMNS;
-                    next -= GRID_COLUMNS;
-                }
+                return;   // 无处可移动: 保留默认按键行为
             }
-            if (sym == FcitxKey_Down) {
-                if (next + GRID_COLUMNS < start + count) next += GRID_COLUMNS;
-                else if (next + GRID_COLUMNS < static_cast<int>(cands_.size())) {
-                    windowStart_ += GRID_COLUMNS;
-                    next += GRID_COLUMNS;
-                }
-            }
-            selected_ = next;
             updateUI(*ic);
             handled = true;
-            }
         }
-        // - / = / PgUp / PgDn : move between four-row candidate grids.
+        // - / = / PgUp / PgDn : 每页 5 个候选前后翻页
         else if (sym == FcitxKey_minus || sym == FcitxKey_Page_Up) {
             if (!buf_.empty() && windowStart_ > 0) {
-                windowStart_ = std::max(0, windowStart_ - PAGE_SIZE);
+                windowStart_ = std::max(0, windowStart_ - COMPACT_PAGE_SIZE);
                 selected_ = windowStart_;
                 updateUI(*ic);
                 handled = true;
@@ -857,14 +798,10 @@ void WeTypeEngine::keyEvent(const InputMethodEntry &, KeyEvent &event) {
         }
         else if (sym == FcitxKey_equal || sym == FcitxKey_plus ||
                  sym == FcitxKey_KP_Add || sym == FcitxKey_Page_Down) {
-            if (!buf_.empty() && candidatesCurrent_ && !cands_.empty() && !expandedGrid_) {
-                expandedGrid_ = true;
-                updateUI(*ic);
-                handled = true;
-            } else if (!buf_.empty() && expandedGrid_ &&
-                       candidatesCurrent_ && windowStart_ + PAGE_SIZE < (int)cands_.size()) {
-                windowStart_ = std::min(windowStart_ + PAGE_SIZE,
-                    ((static_cast<int>(cands_.size()) - 1) / GRID_COLUMNS) * GRID_COLUMNS);
+            // 统一按 5 个一页翻页(紧凑行同样只有 5 个可选序号), 不再展开 20 字网格
+            if (!buf_.empty() && candidatesCurrent_ &&
+                windowStart_ + COMPACT_PAGE_SIZE < (int)cands_.size()) {
+                windowStart_ += COMPACT_PAGE_SIZE;
                 selected_ = windowStart_;
                 updateUI(*ic);
                 handled = true;
@@ -891,7 +828,6 @@ void WeTypeEngine::keyEvent(const InputMethodEntry &, KeyEvent &event) {
                 candidatesCurrent_ = false;
                 windowStart_ = 0;
                 selected_ = 0;
-                expandedGrid_ = false;
                 eng_.send("C", nullptr);
                 updateUI(*ic);
                 handled = true;
@@ -903,12 +839,11 @@ void WeTypeEngine::keyEvent(const InputMethodEntry &, KeyEvent &event) {
                 handled = true;
             }
         }
-        // 数字选词(全局序号 = 页首 + 数字)
+        // 数字选词(全局序号 = 页首 + 数字, 每页 5 个)
         else if (sym >= FcitxKey_1 && sym <= FcitxKey_9) {
             int ordinal = static_cast<int>(sym - FcitxKey_1);
-            int visibleCount = expandedGrid_ ? PAGE_SIZE : COMPACT_PAGE_SIZE;
             int idx = windowStart_ + ordinal;
-            if (ordinal < visibleCount && candidatesCurrent_ && !cands_.empty() && idx < (int)cands_.size()) {
+            if (ordinal < COMPACT_PAGE_SIZE && candidatesCurrent_ && !cands_.empty() && idx < (int)cands_.size()) {
                 commitCandidate(ic, idx);
                 handled = true;
             }
@@ -949,7 +884,6 @@ void WeTypeEngine::keyEvent(const InputMethodEntry &, KeyEvent &event) {
                     candidatesCurrent_ = false;
                     windowStart_ = 0;
                     selected_ = 0;
-                    expandedGrid_ = false;
                     updateUI(*ic);
                 } else {
                     requestCandidates(buf_);
@@ -967,7 +901,6 @@ void WeTypeEngine::keyEvent(const InputMethodEntry &, KeyEvent &event) {
                 candidatesCurrent_ = false;
                 windowStart_ = 0;
                 selected_ = 0;
-                expandedGrid_ = false;
                 eng_.send("C", nullptr);
                 updateUI(*ic);
                 handled = true;
