@@ -34,6 +34,21 @@ sudo pacman -S --needed python patchelf unzip curl    # Arch
 
 APK 约 214 MB，只下载一次，缓存在 `~/.cache/wetype-ime`。用户学习数据在 `~/.local/share/wetype-ime`。
 
+## 体验增强
+
+**候选英文释义（可选）**：插件启动时会尝试加载 `~/.local/share/wetype-ime/glossary-en.tsv`，文件存在时，候选词旁会以斜体显示英文译文，纯内存查询、无网络请求；查不到释义的候选不受影响。
+
+文件格式为每行 `词<TAB>[词性. ]译文`，兼容 [qingjian](https://github.com/qingjian-team/qingjian) 项目的 `assets/glossary/glossary-en.tsv`（GPL-3.0，约 23 万词条）：
+
+```sh
+mkdir -p ~/.local/share/wetype-ime
+cp glossary-en.tsv ~/.local/share/wetype-ime/
+```
+
+重启 Fcitx5 生效（日志中出现 `glossary loaded: N entries`）。
+
+**上下文智能标点**：上次上屏内容为中文时，`,` `.` 输出全角（`，` `。`）；为英文 / 拼音时输出半角（`,` `.`），无需配置。
+
 ## 从源码构建
 
 构建环境为 x86_64 的 Debian / Ubuntu：
