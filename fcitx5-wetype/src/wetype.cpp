@@ -40,6 +40,8 @@
 #include <vector>
 #include <sstream>
 #include <unordered_set>
+#include <unordered_map>
+#include <atomic>
 
 namespace fcitx {
 
@@ -164,6 +166,62 @@ static void resolveDirs(std::string &eng, std::string &dicts, std::string &work,
     const char *xdg = getenv("XDG_DATA_HOME");
     std::string base = xdg && *xdg ? xdg : std::string(home) + "/.local/share";
     work = getenv("WETYPE_WORK_DIR") ? getenv("WETYPE_WORK_DIR") : base + "/wetype-ime/dict";
+}
+
+// ---------------------------------------------------------------- 青简英文释义
+// 数据来自 qingjian (GPL-3.0) assets/glossary/glossary-en.tsv：
+//   词\t[词性. ]译文[\t译文]   ('#' 开头为注释)
+// 纯内存查询，加载约 23 万行；查不到的候选不显示注释。
+class Glossary {
+public:
+    void load(const std::string &path) {
+        std::FILE *f = std::fopen(path.c_str(), "rb");
+        if (!f) {
+            WLOG("glossary not found: %s\n", path.c_str());
+            return;
+        }
+        char line[512];
+        while (std::fgets(line, sizeof(line), f)) {
+            char *nl = std::strchr(line, '\n');
+            if (nl) *nl = '\0';
+            if (line[0] == '#' || line[0] == '\0') continue;
+            char *tab = std::strchr(line, '\t');
+            if (!tab) continue;
+            *tab = '\0';
+            // 取第一列译文，去掉 "n. " 之类词性前缀，保留更紧凑
+            char *gloss = tab + 1;
+            char *t2 = std::strchr(gloss, '\t');
+            if (t2) *t2 = '\0';
+            char *dot = std::strstr(gloss, ". ");
+            if (dot && dot < gloss + 6) gloss = dot + 2;
+            if (*gloss) map_[line] = gloss;
+        }
+        std::fclose(f);
+        WLOG("glossary loaded: %zu entries\n", map_.size());
+    }
+    // 返回 nullptr 表示无释义
+    const char *lookup(const std::string &word) const {
+        auto it = map_.find(word);
+        return it == map_.end() ? nullptr : it->second.c_str();
+    }
+private:
+    std::unordered_map<std::string, std::string> map_;
+};
+
+// ---------------------------------------------------------------- 上下文标点
+// 判断文本最后一个字符是否为 CJK（中文/日文/韩文）：上次上屏是中文 →
+// 后续标点用全角，是英文 → 半角。
+static bool endsCJK(const std::string &text) {
+    // UTF-8: CJK 统一表意区 3 字节序列 E4-E9 开头；标点区(如，。)E3/EF 不算，
+    // 只看主要表意范围足够判断上下文语言。
+    for (size_t i = text.size(); i > 0;) {
+        --i;
+        const unsigned char c = static_cast<unsigned char>(text[i]);
+        if ((c & 0xC0) == 0x80) continue;          // UTF-8 后续字节
+        if (c >= 0xE4 && c <= 0xE9) return true;   // U+4000–U+9FFF 起始字节附近
+        return false;                              // ASCII 或其他非 CJK 起始
+    }
+    return false;
 }
 
 // ---------------------------------------------------------------- 异步引擎进程
@@ -385,6 +443,11 @@ public:
         signal(SIGPIPE, SIG_IGN);
         std::string eng, dicts, work, qemu, sysroot;
         resolveDirs(eng, dicts, work, qemu, sysroot);
+        {
+            const char *xdg = getenv("XDG_DATA_HOME");
+            std::string base = xdg && *xdg ? xdg : std::string(getenv("HOME") ? getenv("HOME") : "/root") + "/.local/share";
+            glossary_.load(base + "/wetype-ime/glossary-en.tsv");
+        }
         WLOG("async addon init: eng=%s\n", eng.c_str());
         // Start eagerly so the first key never waits for the ~1.5 s engine
         // startup, and bring the engine back as soon as it exits.
@@ -466,6 +529,10 @@ private:
                     Text candidate;
                     candidate.append(std::to_string(index - start + 1) + " ");
                     candidate.append(cands_[index]);
+                    // 青简式英文注释：候选词后附浅色小字译文
+                    if (const char *g = glossary_.lookup(cands_[index])) {
+                        candidate.append("  " + std::string(g), TextFormatFlag::Italic);
+                    }
                     cl->append<GridColumnCandidate>(std::move(candidate),
                         [this, index](InputContext *context) {
                             commitCandidate(context, index);
@@ -510,6 +577,7 @@ private:
         WLOG("commit len=%zu revision=%llu\n", text.size(),
              static_cast<unsigned long long>(revision_));
         ic->commitString(text);
+        lastCommitCJK_ = endsCJK(text);
         ++revision_;
         buf_.clear();
         cands_.clear();
@@ -537,6 +605,7 @@ private:
         // it and keep composing the rest. The engine answers S with the
         // candidates for the remaining pinyin.
         ic->commitString(cands_[index]);
+        lastCommitCJK_ = endsCJK(cands_[index]);
         ++revision_;
         buf_.erase(0, cover);
         cands_.clear();
@@ -641,6 +710,13 @@ private:
                  preview ? 1 : 0);
             windowStart_ = 0;
             selected_ = 0;
+            // 空格在候选到达前已按下: 立即上屏第一个候选词, 不让用户等
+            if (pendingSpaceCommit_.exchange(false) && current && !preview &&
+                !cands_.empty()) {
+                WLOG("pending space commit first candidate\n");
+                commitCandidate(ic, 0);
+                return;
+            }
             updateUI(*ic);
         };
     }
@@ -656,6 +732,7 @@ private:
 
     Instance *instance_;
     EngineProc eng_;
+    Glossary glossary_;
     std::string buf_;
     std::unique_ptr<EventSourceTime> restartSource_;
     std::vector<std::string> cands_;
@@ -668,6 +745,8 @@ private:
     int selected_ = 0;
     bool expandedGrid_ = false;
     bool recoveryTried_ = false;
+    std::atomic<bool> pendingSpaceCommit_{false};   // 空格先于候选到达: 候选回来自动上屏首选
+    bool lastCommitCJK_ = true;   // 上次上屏是否以中文结尾: 决定标点全/半角
     uint64_t revision_ = 0;
     TrackableObjectReference<InputContext> icRef_;
 
@@ -791,15 +870,20 @@ void WeTypeEngine::keyEvent(const InputMethodEntry &, KeyEvent &event) {
                 handled = true;
             }
         }
-        // 逗号/句号: 组词中=首选顶字+标点; 空态透传
+        // 逗号/句号: 组词中=首选顶字+标点; 空态也按上下文转换全/半角
         else if (sym == FcitxKey_comma || sym == FcitxKey_period) {
+            const bool fullwidth = lastCommitCJK_;   // 中文后→全角，英文后→半角
+            std::string punct;
+            if (sym == FcitxKey_comma) punct = fullwidth ? "，" : ",";
+            else punct = fullwidth ? "。" : ".";
             if (!buf_.empty()) {
-                std::string punct = (sym == FcitxKey_comma) ? "," : ".";
                 std::string text = !candidatesCurrent_ || cands_.empty() ? buf_ : cands_[selected_];
                 if (candidatesCurrent_ && !cands_.empty())
                     eng_.send("S " + std::to_string(selected_), nullptr);
-                WLOG("commit with punctuation text_len=%zu\n", text.size() + punct.size());
+                WLOG("commit with punctuation text_len=%zu fullwidth=%d\n", text.size() + punct.size(),
+                     fullwidth ? 1 : 0);
                 ic->commitString(text + punct);
+                lastCommitCJK_ = fullwidth;   // 刚上屏的是中文词+中文标点
                 ++revision_;
                 buf_.clear();
                 cands_.clear();
@@ -810,6 +894,12 @@ void WeTypeEngine::keyEvent(const InputMethodEntry &, KeyEvent &event) {
                 expandedGrid_ = false;
                 eng_.send("C", nullptr);
                 updateUI(*ic);
+                handled = true;
+            } else {
+                // 上屏后的独立标点: 按上次上屏语言转换 (中文后全角，英文后半角)
+                WLOG("standalone punctuation fullwidth=%d\n", fullwidth ? 1 : 0);
+                ic->commitString(punct);
+                lastCommitCJK_ = fullwidth;
                 handled = true;
             }
         }
@@ -826,8 +916,14 @@ void WeTypeEngine::keyEvent(const InputMethodEntry &, KeyEvent &event) {
         // 空格: 上屏首选(或原文)
         else if (sym == FcitxKey_space) {
             if (!buf_.empty()) {
-                if (candidatesCurrent_ && !cands_.empty()) commitCandidate(ic, selected_);   // 含部分选词与词库学习
-                else commitText(ic, buf_);
+                if (candidatesCurrent_ && !cands_.empty()) {
+                    commitCandidate(ic, selected_);   // 含部分选词与词库学习
+                } else {
+                    // 打字过快时引擎响应未到: 不上屏拼音, 标记待提交,
+                    // 候选一回来立即上屏第一个候选词 (见 candidateHandler)
+                    pendingSpaceCommit_ = true;
+                    selected_ = 0;
+                }
                 handled = true;
             }
         }
