@@ -58,12 +58,12 @@ check("Ctrl-comma shortcut remains passthrough", not first.press(",", states=4) 
 check("punctuation release remains passthrough", not first.press(",", release=True) and not first.commits)
 
 # The widened table: only these keys are owned, shifted forms stay untouched.
-for key, expected in [("?", "？"), ("!", "！"), (":", "："), (";", "；"), ("`", "、")]:
+for key, expected in [("?", "？"), ("!", "！"), (":", "："), (";", "；"), ("\\", "、")]:
     first.commits.clear()
     first.press(key)
     check("Chinese state converts %s to fullwidth" % key, first.commits == [expected],
           str(first.commits))
-for key in ["<", "~", "/", '"', "[", "-"]:
+for key in ["<", "~", "/", '"', "[", "-", "`", "|"]:
     first.commits.clear()
     consumed = first.press(key)
     check("unowned key %s stays passthrough" % key, not consumed and not first.commits,

@@ -7,8 +7,10 @@
 namespace wetype {
 
 // Keys the plugin owns in the Chinese input state. Everything here becomes
-// fullwidth; `、` has no ASCII twin in running text, so its halfwidth form is
-// the empty view and the caller lets the key through untouched.
+// fullwidth; the backslash is the 、 key, and it has no ASCII twin in running
+// text, so its halfwidth form is the empty view and the caller lets the key
+// through untouched. The grave key deliberately stays a backtick: it is what
+// markdown and shell quoting need.
 inline std::string_view punctuation(char key, bool fullwidth) {
     switch (key) {
         case ',': return fullwidth ? "，" : ",";
@@ -17,7 +19,7 @@ inline std::string_view punctuation(char key, bool fullwidth) {
         case '!': return fullwidth ? "！" : "!";
         case ':': return fullwidth ? "：" : ":";
         case ';': return fullwidth ? "；" : ";";
-        case '`': return fullwidth ? "、" : "";
+        case '\\': return fullwidth ? "、" : "";
         default: return {};
     }
 }

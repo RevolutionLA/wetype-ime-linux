@@ -19,24 +19,26 @@ void expectTable() {
         if (!wetype::ownsPunctuation(c.key))
             throw std::runtime_error(std::string("key not owned: ") + c.key);
     }
-    // The grave key is the 、 key. It has no halfwidth form: the caller must let
-    // the key through rather than commit an empty string.
-    if (wetype::punctuation('`', true) != "、" || !wetype::punctuation('`', false).empty())
-        throw std::runtime_error("wrong grave/、 handling");
+    // The backslash key is the 、 key. It has no halfwidth form: the caller must
+    // let the key through rather than commit an empty string.
+    if (wetype::punctuation('\\', true) != "、" || !wetype::punctuation('\\', false).empty())
+        throw std::runtime_error("wrong backslash/、 handling");
 }
 
 void expectOwnedSetIsClosed() {
     const char plain[] = {"aA09 /<>()\"'~@#$%^&*_+-={}[]\\|;:,.?!`"};
     for (const char c : plain) {
         const bool expected = (c == ',' || c == '.' || c == '?' || c == '!' ||
-                               c == ':' || c == ';' || c == '`');
+                               c == ':' || c == ';' || c == '\\');
         if (wetype::ownsPunctuation(c) != expected)
             throw std::runtime_error("ownership changed for an unlisted key");
     }
-    // Shifted forms arrive as their own keysyms and are deliberately unowned.
+    // Shifted forms arrive as their own keysyms and are deliberately unowned,
+    // and the grave key must stay a backtick for markdown and shell quoting.
     if (wetype::ownsPunctuation('<') || wetype::ownsPunctuation('~') ||
-        wetype::ownsPunctuation('"'))
-        throw std::runtime_error("shifted symbol should stay untouched");
+        wetype::ownsPunctuation('|') || wetype::ownsPunctuation('"') ||
+        wetype::ownsPunctuation('`'))
+        throw std::runtime_error("shifted or excluded symbol should stay untouched");
 }
 
 void expectDigitException() {
