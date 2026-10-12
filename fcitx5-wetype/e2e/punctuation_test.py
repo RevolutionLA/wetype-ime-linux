@@ -57,17 +57,45 @@ first.commits.clear()
 check("Ctrl-comma shortcut remains passthrough", not first.press(",", states=4) and not first.commits)
 check("punctuation release remains passthrough", not first.press(",", release=True) and not first.commits)
 
-# The widened table: only these keys are owned, shifted forms stay untouched.
-for key, expected in [("?", "？"), ("!", "！"), (":", "："), (";", "；"), ("\\", "、")]:
+# The widened table: every ASCII symbol is owned except the grave key.
+for key, expected in [("?", "？"), ("!", "！"), (":", "："), (";", "；"), ("\\", "、"),
+                      ("(", "（"), (")", "）"), ("[", "【"), ("]", "】"), ("{", "｛"),
+                      ("}", "｝"), ("<", "《"), (">", "》"), ("-", "－"), ("_", "＿"),
+                      ("+", "＋"), ("=", "＝"), ("*", "＊"), ("/", "／"), ("#", "＃"),
+                      ("$", "＄"), ("%", "％"), ("&", "＆"), ("@", "＠"), ("^", "＾"),
+                      ("~", "～"), ("|", "｜")]:
     first.commits.clear()
-    first.press(key)
-    check("Chinese state converts %s to fullwidth" % key, first.commits == [expected],
-          str(first.commits))
-for key in ["<", "~", "/", '"', "[", "-", "`", "|"]:
+    consumed = first.press(key)
+    check("Chinese state converts %s to fullwidth" % key,
+          consumed and first.commits == [expected], str(first.commits))
+# The grave key is the one symbol left alone, for markdown and shell quoting.
+for key in ["`"]:
     first.commits.clear()
     consumed = first.press(key)
     check("unowned key %s stays passthrough" % key, not consumed and not first.commits,
           "consumed=%s commits=%s" % (consumed, first.commits))
+
+# Quotes pair: the first press opens, the second closes, per input context.
+first.press("esc")
+first.commits.clear()
+first.press('"')
+first.press('"')
+check("double quotes pair into Chinese quotes", first.commits == ["“", "”"],
+      str(first.commits))
+first.commits.clear()
+first.press("'")
+first.press("'")
+check("single quotes pair into Chinese quotes", first.commits == ["‘", "’"],
+      str(first.commits))
+first.commits.clear()
+first.press('"')
+check("a lone quote opens", first.commits == ["“"], str(first.commits))
+first.type("nihao")
+first.commits.clear()
+first.press('"')
+check("quote while composing attaches the closing form to the candidate",
+      first.commits and first.commits[0].endswith("”"), str(first.commits))
+first.press("esc")
 
 first.ic.FocusOut()
 second = Client("wetype-punctuation-B")
@@ -143,6 +171,11 @@ surrounding.commits.clear()
 consumed = surrounding.press("?")
 check("digit away from the cursor does not force ASCII",
       consumed and surrounding.commits == ["？"], str(surrounding.commits))
+surrounding.surrounding("共 3")
+surrounding.commits.clear()
+consumed = surrounding.press("(")
+check("the digit exception covers only . and , so brackets stay fullwidth",
+      consumed and surrounding.commits == ["（"], str(surrounding.commits))
 
 structured = Client("wetype-punctuation-email", BASE_CAPABILITIES | (1 << 7))
 structured.focus()
@@ -152,6 +185,10 @@ check("structured Email field keeps ASCII separator", structured.commits == ["�
 structured.commits.clear()
 consumed = structured.press("?")
 check("structured field keeps ASCII question mark", not consumed and not structured.commits,
+      "consumed=%s commits=%s" % (consumed, structured.commits))
+structured.commits.clear()
+consumed = structured.press('"')
+check("structured field keeps ASCII quote", not consumed and not structured.commits,
       "consumed=%s commits=%s" % (consumed, structured.commits))
 structured.ic.FocusOut()
 
