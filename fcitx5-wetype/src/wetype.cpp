@@ -412,8 +412,10 @@ private:
 
 // Punctuation history belongs to one input context and is never shared by
 // Fcitx's ShareInputState option (the property's default needCopy() is false).
+// Only one fact is remembered: whether a digit sits right before the cursor,
+// because that is the sole exception to fullwidth punctuation.
 struct PunctuationState : InputContextProperty {
-    wetype::TextLanguage language = wetype::TextLanguage::Unknown;
+    bool afterDigit = false;
 };
 
 // ---------------------------------------------------------------- 主引擎类
@@ -432,11 +434,11 @@ public:
                 if (!ic) return;
                 const auto &surrounding = ic->surroundingText();
                 auto *state = ic->propertyFor(&punctuationFactory_);
-                state->language = wetype::TextLanguage::Unknown;
+                state->afterDigit = false;
                 if (surrounding.isValid() && surrounding.cursor() > 0) {
                     const auto &text = surrounding.text();
                     const auto bytes = utf8::ncharByteLength(text.begin(), surrounding.cursor());
-                    state->language = wetype::endingLanguage(std::string_view(text.data(), bytes));
+                    state->afterDigit = wetype::endsWithDigit(std::string_view(text.data(), bytes));
                 }
             });
         const char *xdg = getenv("XDG_DATA_HOME");
@@ -480,10 +482,10 @@ public:
         if (event.type() == EventType::InputContextSwitchInputMethod && !buf_.empty()) {
             WLOG("deactivate commits raw pinyin len=%zu\n", buf_.size());
             const auto raw = pendingRaw();
-            rememberLanguage(ic, raw);
+            rememberTrailing(ic, raw);
             ic->commitString(raw);
         } else if (event.type() == EventType::InputContextSwitchInputMethod) {
-            ic->propertyFor(&punctuationFactory_)->language = wetype::TextLanguage::Unknown;
+            ic->propertyFor(&punctuationFactory_)->afterDigit = false;
         }
         bool had = !buf_.empty() || !cands_.empty();
         clearAll();
@@ -558,25 +560,27 @@ private:
         ic.updateUserInterface(UserInterfaceComponent::InputPanel);
     }
 
-    void rememberLanguage(InputContext *ic, std::string_view text) {
-        ic->propertyFor(&punctuationFactory_)->language = wetype::endingLanguage(text);
+    void rememberTrailing(InputContext *ic, std::string_view text) {
+        ic->propertyFor(&punctuationFactory_)->afterDigit = wetype::endsWithDigit(text);
     }
 
-    wetype::TextLanguage punctuationLanguage(InputContext *ic, std::string_view text = {}) {
-        // Structured input fields must retain ASCII separators.
+    // WeType is the Chinese input state, so its punctuation is fullwidth by
+    // default. Two things force ASCII: a digit right before the cursor, and
+    // structured fields, where 3.14 and user@example.com must stay machine-readable.
+    bool fullwidthPunctuation(InputContext *ic, std::string_view text = {}) {
         if (ic->capabilityFlags().testAny(CapabilityFlags{
                 CapabilityFlag::Password, CapabilityFlag::Email, CapabilityFlag::Url,
                 CapabilityFlag::Digit, CapabilityFlag::Number, CapabilityFlag::Dialable})) {
-            return wetype::TextLanguage::Latin;
+            return false;
         }
-        return text.empty() ? ic->propertyFor(&punctuationFactory_)->language
-                            : wetype::endingLanguage(text);
+        return text.empty() ? !ic->propertyFor(&punctuationFactory_)->afterDigit
+                            : !wetype::endsWithDigit(text);
     }
 
     void commitText(InputContext *ic, const std::string &text) {
         WLOG("commit len=%zu revision=%llu\n", text.size(),
              static_cast<unsigned long long>(revision_));
-        rememberLanguage(ic, text);
+        rememberTrailing(ic, text);
         ic->commitString(text);
         ++revision_;
         buf_.clear();
@@ -603,7 +607,7 @@ private:
         // The candidate covers only a prefix (e.g. 你好 of nihaoshijie): commit
         // it and keep composing the rest. The engine answers S with the
         // candidates for the remaining pinyin.
-        rememberLanguage(ic, cands_[index]);
+        rememberTrailing(ic, cands_[index]);
         ic->commitString(cands_[index]);
         ++revision_;
         buf_.erase(0, cover);
@@ -922,9 +926,11 @@ void WeTypeEngine::processKey(KeyEvent &event) {
     if (!event.isRelease()) {
         if (normalizePage()) updateUI(*ic);
         // Digits passed through without surrounding-text support still make
-        // decimal punctuation ASCII rather than inheriting a Chinese commit.
-        if (buf_.empty() && sym >= FcitxKey_0 && sym <= FcitxKey_9) {
-            ic->propertyFor(&punctuationFactory_)->language = wetype::TextLanguage::Latin;
+        // the next comma or period ASCII rather than inheriting a Chinese
+        // commit. The numpad row counts too: it is where many people type 3.14.
+        if (buf_.empty() && ((sym >= FcitxKey_0 && sym <= FcitxKey_9) ||
+                             (sym >= FcitxKey_KP_0 && sym <= FcitxKey_KP_9))) {
+            ic->propertyFor(&punctuationFactory_)->afterDigit = true;
         }
         // Alphabet keys, including Shift/CapsLock symbols, become lowercase
         // pinyin. Ctrl/Alt/Super/Meta shortcuts were passed through above.
@@ -994,21 +1000,24 @@ void WeTypeEngine::processKey(KeyEvent &event) {
                 handled = true;
             }
         }
-        // Composing: classify the text being committed, not a previous word.
-        // Idle: convert only known CJK context; Latin/unknown remain passthrough.
-        else if (sym == FcitxKey_comma || sym == FcitxKey_period) {
-            const char key = sym == FcitxKey_comma ? ',' : '.';
+        // Owned punctuation (, . ? ! : ; and ` for 、). Composing picks the width
+        // from the text about to be committed; idle text is in the Chinese input
+        // state, so the fullwidth form wins unless a digit precedes the cursor.
+        else if (sym < 0x80 && wetype::ownsPunctuation(static_cast<char>(sym))) {
+            const char key = static_cast<char>(sym);
             if (!buf_.empty()) {
                 const std::string text = !candidatesCurrent_ || cands_.empty() ? buf_ : cands_[selected_];
-                const auto punct = wetype::punctuation(key, punctuationLanguage(ic, text));
-                if (candidatesCurrent_ && !cands_.empty())
-                    eng_.send("S " + std::to_string(selected_), nullptr);
-                WLOG("commit with punctuation text_len=%zu\n", text.size() + punct.size());
-                // commitText sees a copy so clearing the buffer cannot invalidate it.
-                commitText(ic, text + std::string(punct));
-                handled = true;
-            } else if (punctuationLanguage(ic) == wetype::TextLanguage::Cjk) {
-                ic->commitString(std::string(wetype::punctuation(key, wetype::TextLanguage::Cjk)));
+                const auto punct = wetype::punctuation(key, fullwidthPunctuation(ic, text));
+                if (!punct.empty()) {
+                    if (candidatesCurrent_ && !cands_.empty())
+                        eng_.send("S " + std::to_string(selected_), nullptr);
+                    WLOG("commit with punctuation text_len=%zu\n", text.size() + punct.size());
+                    // commitText sees a copy so clearing the buffer cannot invalidate it.
+                    commitText(ic, text + std::string(punct));
+                    handled = true;
+                }
+            } else if (fullwidthPunctuation(ic)) {
+                ic->commitString(std::string(wetype::punctuation(key, true)));
                 handled = true;
             }
         }
